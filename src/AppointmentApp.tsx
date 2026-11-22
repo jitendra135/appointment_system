@@ -19,11 +19,220 @@ type Appointment = {
 };
 type View = "overview" | "schedule" | "providers" | "patient" | "departments" | "availability" | "reports";
 type FormData = Omit<Appointment, "id">;
+type DemoStore = {
+  appointments: Appointment[];
+  providers: Provider[];
+  departments: string[];
+  blocks: BlockedSlot[];
+  clinic: ClinicSettings;
+};
 const roles: Role[] = ["patient", "doctor", "receptionist", "admin"];
 const demoUserId = "admin";
 const demoPassword = "admin";
+const staticDemoMode = import.meta.env.VITE_STATIC_DEMO === "true";
+const demoStoreKey = "wellnest-pages-data-v1";
+
+const defaultDemoStore = (): DemoStore => ({
+  appointments: [],
+  providers: [
+    { id: "prv-1", name: "Dr. Aarav Sharma", specialty: "Primary care", email: "", phone: "", color: "#b75b46" },
+    { id: "prv-2", name: "Dr. Priya Nair", specialty: "Dermatology", email: "", phone: "", color: "#487765" },
+    { id: "prv-3", name: "Dr. Arjun Mehta", specialty: "Cardiology", email: "", phone: "", color: "#a88042" },
+    { id: "prv-4", name: "Dr. Ananya Iyer", specialty: "Pediatrics", email: "", phone: "", color: "#6878a0" },
+  ],
+  departments: ["Primary care", "Dermatology", "Cardiology", "Pediatrics"],
+  blocks: [],
+  clinic: { isOpen: true, openingTime: "09:00", closingTime: "18:00" },
+});
+
+const readDemoStore = (): DemoStore => {
+  const saved = localStorage.getItem(demoStoreKey);
+  if (!saved) {
+    const initial = defaultDemoStore();
+    localStorage.setItem(demoStoreKey, JSON.stringify(initial));
+    return initial;
+  }
+  const store: unknown = JSON.parse(saved);
+  if (!store || typeof store !== "object" || !("appointments" in store) || !Array.isArray(store.appointments) ||
+      !("providers" in store) || !Array.isArray(store.providers) || !("departments" in store) || !Array.isArray(store.departments) ||
+      !("blocks" in store) || !Array.isArray(store.blocks) || !("clinic" in store) || typeof store.clinic !== "object") {
+    throw new Error("Saved browser demo data is invalid. Clear this site's storage to reset the demo.");
+  }
+  return store as DemoStore;
+};
+
+const writeDemoStore = (store: DemoStore) => localStorage.setItem(demoStoreKey, JSON.stringify(store));
+const minutesOf = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+const validDate = (date: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const [year, month, day] = date.split("-").map(Number);
+  const parsed = new Date(year, month - 1, day);
+  return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day;
+};
+const overlaps = (start: number, duration: number, otherStart: number, otherDuration: number) =>
+  start < otherStart + otherDuration && otherStart < start + duration;
+
+const validateDemoAppointment = (input: Partial<Appointment>, store: DemoStore, id?: string) => {
+  if (!input.patientName?.trim() || !input.providerId || !input.date || !input.time || !input.type?.trim()) {
+    return "Complete all required appointment fields.";
+  }
+  if (!store.providers.some((provider) => provider.id === input.providerId)) return "Choose a valid provider.";
+  if (!validDate(input.date)) return "Choose a valid date.";
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(input.time)) return "Choose a valid appointment time.";
+  const duration = Number(input.duration ?? 30);
+  if (!Number.isInteger(duration) || duration < 15 || duration > 180) return "Duration must be between 15 and 180 minutes.";
+  const start = minutesOf(input.time);
+  if (start < minutesOf(store.clinic.openingTime) || start + duration > minutesOf(store.clinic.closingTime)) {
+    return `Appointment must fit within clinic hours (${store.clinic.openingTime}–${store.clinic.closingTime}).`;
+  }
+  const conflict = store.appointments.some((appointment) =>
+    appointment.id !== id && appointment.providerId === input.providerId && appointment.date === input.date &&
+    !["cancelled", "rejected", "no-show"].includes(appointment.status) &&
+    overlaps(start, duration, minutesOf(appointment.time), appointment.duration));
+  if (conflict) return "This provider already has an appointment during that time.";
+  const blocked = store.blocks.some((block) =>
+    block.providerId === input.providerId && block.date === input.date &&
+    overlaps(start, duration, minutesOf(block.time), block.duration));
+  if (blocked) return "This provider is unavailable during that time.";
+  if (input.patientEmail && !/^\S+@\S+\.\S+$/.test(input.patientEmail)) return "Enter a valid patient email address.";
+  return null;
+};
+
+const staticApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  const url = new URL(path, window.location.origin);
+  const [resource, id, action] = url.pathname.split("/").filter(Boolean);
+  const method = options?.method ?? "GET";
+  const store = readDemoStore();
+  const body = options?.body ? JSON.parse(String(options.body)) as Record<string, unknown> : {};
+  const fail = (message: string): never => { throw new Error(message); };
+  const respond = (result: unknown) => result as T;
+
+  if (resource === "clinic" && method === "GET") return respond(store.clinic);
+  if (resource === "clinic" && method === "PATCH") {
+    const updated = { ...store.clinic, ...body };
+    if (typeof updated.isOpen !== "boolean") return fail("Clinic status must be open or closed.");
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(updated.openingTime)) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(updated.closingTime))) {
+      return fail("Enter valid opening and closing times.");
+    }
+    if (minutesOf(String(updated.openingTime)) >= minutesOf(String(updated.closingTime))) return fail("Closing time must be later than opening time.");
+    store.clinic = updated;
+    writeDemoStore(store);
+    return respond(store.clinic);
+  }
+  if (resource === "departments" && method === "GET") return respond(store.departments);
+  if (resource === "departments" && method === "POST") {
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return fail("Department name is required.");
+    if (store.departments.some((department) => department.toLowerCase() === name.toLowerCase())) return fail("That department already exists.");
+    store.departments.push(name);
+    writeDemoStore(store);
+    return respond(store.departments);
+  }
+  if (resource === "providers" && method === "GET") return respond(store.providers);
+  if (resource === "providers" && method === "POST") {
+    if (typeof body.name !== "string" || !body.name.trim() || typeof body.specialty !== "string" || !body.specialty.trim()) {
+      return fail("Provider name and specialty are required.");
+    }
+    const provider: Provider = {
+      id: `prv-${crypto.randomUUID()}`,
+      name: body.name.trim(),
+      specialty: body.specialty.trim(),
+      email: typeof body.email === "string" ? body.email.trim() : "",
+      phone: typeof body.phone === "string" ? body.phone.trim() : "",
+      color: "#487765",
+    };
+    store.providers.push(provider);
+    writeDemoStore(store);
+    return respond(provider);
+  }
+  if (resource === "blocks" && method === "GET") return respond(store.blocks);
+  if (resource === "blocks" && method === "POST") {
+    const { providerId, date, time } = body;
+    if (typeof providerId !== "string" || !store.providers.some((provider) => provider.id === providerId)) return fail("Choose a valid provider.");
+    if (typeof date !== "string" || !validDate(date) || typeof time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return fail("Choose a valid date and time.");
+    const duration = Number(body.duration || 30);
+    if (!Number.isInteger(duration) || duration < 15 || duration > 180) return fail("Duration must be between 15 and 180 minutes.");
+    const start = minutesOf(time);
+    if (start < minutesOf(store.clinic.openingTime) || start + duration > minutesOf(store.clinic.closingTime)) return fail("Unavailable time must fit within clinic hours.");
+    if (store.appointments.some((appointment) =>
+      appointment.providerId === providerId && appointment.date === date && !["cancelled", "rejected", "no-show"].includes(appointment.status) &&
+      overlaps(start, duration, minutesOf(appointment.time), appointment.duration))) return fail("This provider already has an appointment during that time.");
+    if (store.blocks.some((block) =>
+      block.providerId === providerId && block.date === date && overlaps(start, duration, minutesOf(block.time), block.duration))) {
+      return fail("This provider already has unavailable time during that slot.");
+    }
+    const block: BlockedSlot = {
+      id: `blk-${crypto.randomUUID()}`, providerId, date, time, duration,
+      reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Unavailable",
+    };
+    store.blocks.push(block);
+    writeDemoStore(store);
+    return respond(block);
+  }
+  if (resource === "blocks" && id && method === "DELETE") {
+    const index = store.blocks.findIndex((block) => block.id === id);
+    if (index < 0) return fail("Unavailable time not found.");
+    store.blocks.splice(index, 1);
+    writeDemoStore(store);
+    return respond({ ok: true });
+  }
+  if (resource === "appointments" && !id && method === "GET") {
+    const filtered = store.appointments
+      .filter((appointment) => !url.searchParams.has("date") || appointment.date === url.searchParams.get("date"))
+      .filter((appointment) => !url.searchParams.has("from") || appointment.date >= String(url.searchParams.get("from")))
+      .filter((appointment) => !url.searchParams.has("to") || appointment.date <= String(url.searchParams.get("to")))
+      .filter((appointment) => !url.searchParams.has("status") || appointment.status === url.searchParams.get("status"))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+    return respond(filtered);
+  }
+  if (resource === "appointments" && !id && method === "POST") {
+    const appointment = { ...body, duration: Number(body.duration || 30), status: body.status || "scheduled" } as Partial<Appointment>;
+    const error = validateDemoAppointment(appointment, store);
+    if (error) return fail(error);
+    const statuses: Status[] = ["scheduled", "confirmed", "checked-in", "in-progress", "completed", "rejected", "cancelled", "no-show"];
+    if (!statuses.includes(appointment.status as Status)) return fail("Choose a valid status.");
+    const created = {
+      ...appointment,
+      id: `apt-${crypto.randomUUID()}`,
+      patientName: appointment.patientName!.trim(),
+      type: appointment.type!.trim(),
+      notes: appointment.notes?.trim() || "",
+    } as Appointment;
+    store.appointments.push(created);
+    writeDemoStore(store);
+    return respond(created);
+  }
+  if (resource === "appointments" && id && method === "DELETE") {
+    const index = store.appointments.findIndex((appointment) => appointment.id === id);
+    if (index < 0) return fail("Appointment not found.");
+    store.appointments.splice(index, 1);
+    writeDemoStore(store);
+    return respond({ ok: true });
+  }
+  if (resource === "appointments" && id && action === "reminder" && method === "POST") {
+    const appointment = store.appointments.find((item) => item.id === id);
+    if (!appointment) return fail("Appointment not found.");
+    appointment.reminderSentAt = new Date().toISOString();
+    writeDemoStore(store);
+    return respond(appointment);
+  }
+  if (resource === "appointments" && id && method === "PATCH") {
+    const index = store.appointments.findIndex((appointment) => appointment.id === id);
+    if (index < 0) return fail("Appointment not found.");
+    const updated = { ...store.appointments[index], ...body } as Appointment;
+    const statuses: Status[] = ["scheduled", "confirmed", "checked-in", "in-progress", "completed", "rejected", "cancelled", "no-show"];
+    if (!statuses.includes(updated.status)) return fail("Choose a valid status.");
+    const error = validateDemoAppointment(updated, store, id);
+    if (error) return fail(error);
+    store.appointments[index] = updated;
+    writeDemoStore(store);
+    return respond(updated);
+  }
+  return fail("Unsupported demo API operation.");
+};
 
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  if (staticDemoMode) return staticApi<T>(path, options);
   const response = await fetch(`/api/${path}`, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "Something went wrong.");
@@ -49,7 +258,7 @@ function LoginPage({ onLogin }: { onLogin: (userId: string, password: string) =>
   return (
     <main className="login-page">
       <section className="login-card">
-        <a className="login-brand" href="/" aria-label="Wellnest home">
+        <a className="login-brand" href={import.meta.env.BASE_URL} aria-label="Wellnest home">
           <span className="brand-mark"><HeartPulse size={20} strokeWidth={2.2} /></span>
           <span>wellnest<span className="brand-period">.</span><small>CARE OPERATIONS</small></span>
         </a>
@@ -71,6 +280,7 @@ function LoginPage({ onLogin }: { onLogin: (userId: string, password: string) =>
           <button className="primary-button login-submit" type="submit">Sign in <ArrowRight size={16} /></button>
         </form>
         <p className="login-demo-hint">Demo login: user ID <strong>admin</strong> · password <strong>admin</strong></p>
+        {staticDemoMode && <p className="login-demo-hint">Demo data is saved only in this browser and is not shared with other visitors.</p>}
       </section>
       <p className="login-footer">WELLNEST <i>·</i> CARE, IN GOOD ORDER</p>
     </main>
