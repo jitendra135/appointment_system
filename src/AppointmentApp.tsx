@@ -231,7 +231,122 @@ const staticApi = async <T,>(path: string, options?: RequestInit): Promise<T> =>
   return fail("Unsupported demo API operation.");
 };
 
+type AppointmentRow = {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  patient_email: string;
+  patient_phone: string;
+  provider_id: string;
+  appointment_date: string;
+  appointment_time: string;
+  duration_minutes: number;
+  visit_type: string;
+  status: Status;
+  notes: string;
+  reminder_sent_at: string | null;
+};
+
+const appointmentFromRow = (row: AppointmentRow): Appointment => ({
+  id: row.id,
+  patientName: row.patient_name,
+  patientEmail: row.patient_email,
+  patientPhone: row.patient_phone,
+  providerId: row.provider_id,
+  date: row.appointment_date,
+  time: row.appointment_time.slice(0, 5),
+  duration: row.duration_minutes,
+  type: row.visit_type,
+  status: row.status,
+  notes: row.notes,
+  reminderSentAt: row.reminder_sent_at ?? undefined,
+});
+
+const appointmentToRow = (appointment: Partial<Appointment>) => {
+  const row: Partial<Omit<AppointmentRow, "id" | "patient_id">> = {};
+  if (appointment.patientName !== undefined) row.patient_name = appointment.patientName;
+  if (appointment.patientEmail !== undefined) row.patient_email = appointment.patientEmail;
+  if (appointment.patientPhone !== undefined) row.patient_phone = appointment.patientPhone;
+  if (appointment.providerId !== undefined) row.provider_id = appointment.providerId;
+  if (appointment.date !== undefined) row.appointment_date = appointment.date;
+  if (appointment.time !== undefined) row.appointment_time = appointment.time;
+  if (appointment.duration !== undefined) row.duration_minutes = appointment.duration;
+  if (appointment.type !== undefined) row.visit_type = appointment.type;
+  if (appointment.status !== undefined) row.status = appointment.status;
+  if (appointment.notes !== undefined) row.notes = appointment.notes;
+  if (appointment.reminderSentAt !== undefined) row.reminder_sent_at = appointment.reminderSentAt;
+  return row;
+};
+
+const sharedAppointmentApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  if (!supabase) throw new Error(supabaseConfigurationError);
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) throw new Error("Sign in to manage appointments.");
+
+  const url = new URL(path, window.location.origin);
+  const [resource, id, action] = url.pathname.split("/").filter(Boolean);
+  const method = options?.method ?? "GET";
+  const body = options?.body ? JSON.parse(String(options.body)) as Partial<Appointment> : {};
+  const respond = (result: unknown) => result as T;
+
+  if (resource !== "appointments") throw new Error("Unsupported shared-data operation.");
+  if (!id && method === "GET") {
+    let query = supabase.from("appointments").select("*").order("appointment_date").order("appointment_time");
+    const date = url.searchParams.get("date");
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    const status = url.searchParams.get("status");
+    if (date) query = query.eq("appointment_date", date);
+    if (from) query = query.gte("appointment_date", from);
+    if (to) query = query.lte("appointment_date", to);
+    if (status) query = query.eq("status", status);
+    const { data, error: queryError } = await query;
+    if (queryError) throw queryError;
+    return respond((data ?? []).map((row) => appointmentFromRow(row as AppointmentRow)));
+  }
+  if (!id && method === "POST") {
+    const { data, error: insertError } = await supabase.from("appointments")
+      .insert({
+        ...appointmentToRow(body),
+        patient_id: user.id,
+        status: "scheduled",
+      })
+      .select("*")
+      .single();
+    if (insertError) throw insertError;
+    return respond(appointmentFromRow(data as AppointmentRow));
+  }
+  if (id && action === "reminder" && method === "POST") {
+    const { data, error: updateError } = await supabase.from("appointments")
+      .update({ reminder_sent_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (updateError) throw updateError;
+    return respond(appointmentFromRow(data as AppointmentRow));
+  }
+  if (id && method === "PATCH") {
+    const { data, error: updateError } = await supabase.from("appointments")
+      .update(appointmentToRow(body))
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (updateError) throw updateError;
+    return respond(appointmentFromRow(data as AppointmentRow));
+  }
+  if (id && method === "DELETE") {
+    const { error: deleteError } = await supabase.from("appointments").delete().eq("id", id);
+    if (deleteError) throw deleteError;
+    return respond({ ok: true });
+  }
+  throw new Error("Unsupported shared appointment operation.");
+};
+
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  if (path.split(/[/?]/, 1)[0] === "appointments" && supabase) {
+    return sharedAppointmentApi<T>(path, options);
+  }
   if (staticDemoMode) return staticApi<T>(path, options);
   const response = await fetch(`/api/${path}`, { ...options, headers: { "Content-Type": "application/json", ...options?.headers } });
   const result = await response.json();
@@ -320,6 +435,18 @@ function App() {
 
   useEffect(() => {
     if (authUser) void refresh();
+  }, [authUser]);
+  useEffect(() => {
+    if (!authUser || !supabase) return;
+    const channel = supabase
+      .channel(`appointments:${authUser.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments" }, () => {
+        void refresh();
+      })
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
   }, [authUser]);
   useEffect(() => {
     if (!supabase) {
@@ -635,7 +762,7 @@ function App() {
                     <label className="form-field"><span>Account email</span><input required type="email" value={patientEmail} readOnly /></label>
                     <button className="secondary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Save patient profile"}</button>
                   </form>
-                  <p className="demo-note">Appointment and clinic data in this demo remains on this browser and is not shared with clinic staff. Do not enter real patient information.</p>
+                  <p className="demo-note">Appointment requests are shared with authorized clinic staff. Do not enter real patient information until your clinic has approved this system for it.</p>
                 </article>
                 <article className="portal-card">
                   <div className="lower-heading"><div><span className="eyebrow">BOOK ONLINE</span><h2>Request an appointment</h2></div><CalendarDays size={20} /></div>
@@ -710,7 +837,7 @@ function App() {
                 const provider = providerById.get(appointment.providerId);
                 return <article className="appointment-row" key={appointment.id}><div className="appointment-time"><strong>{new Date(`2000-01-01T${appointment.time}`).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</strong><span>{appointment.duration} min</span></div><div className="timeline-line"><i /></div><div className="patient-avatar" style={{ "--patient-color": provider?.color ?? "#487765" } as React.CSSProperties}>{initials(appointment.patientName)}</div><div className="appointment-details"><div className="patient-name">{appointment.patientName}<span className={`status-pill status-${appointment.status}`}>{appointment.status}</span></div><div className="appointment-meta"><span><Stethoscope size={13} />{provider?.name ?? "Provider unavailable"}</span><i /><span>{appointment.type}</span></div>{(view === "schedule" || calendarMode === "list") && <div className="appointment-date"><CalendarDays size={13} />{displayDate(appointment.date, { weekday: "short", month: "short", day: "numeric" })}</div>}{appointment.reminderSentAt && <div className="appointment-date"><Bell size={12} />Reminder recorded</div>}</div><div className="appointment-actions">
                   {appointment.status === "scheduled" && role !== "patient" && <button className="confirm-button" onClick={() => void changeStatus(appointment, "confirmed")}><Check size={15} />Confirm</button>}
-                  {appointment.status === "scheduled" && role === "doctor" && <button className="secondary-button small-action" onClick={() => void changeStatus(appointment, "rejected")}>Reject</button>}
+                  {appointment.status === "scheduled" && role !== "patient" && <button className="secondary-button small-action" onClick={() => void changeStatus(appointment, "rejected")}>Reject</button>}
                   {appointment.status === "confirmed" && role === "doctor" && <button className="complete-button" onClick={() => void changeStatus(appointment, "in-progress")}>Start visit</button>}
                   {appointment.status === "in-progress" && role === "doctor" && <button className="complete-button" onClick={() => void changeStatus(appointment, "completed")}><CheckCheck size={15} />Complete</button>}
                   {appointment.status === "confirmed" && (role === "admin" || role === "receptionist") && <button className="confirm-button" onClick={() => void changeStatus(appointment, "checked-in")}><Check size={15} />Check in</button>}

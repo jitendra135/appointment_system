@@ -114,7 +114,7 @@ export default function AuthPage({
           <p className="login-message" role="status">{configurationError}</p>
         )}
         <p className="login-demo-hint">Use a valid email address. New accounts may need email confirmation.</p>
-        <p className="login-demo-hint">Appointment data in this demo stays in this browser. Do not enter real patient information.</p>
+        <p className="login-demo-hint">Appointment requests are shared with authorized clinic staff. Use a private password and do not enter real patient information until your clinic has approved this system for it.</p>
       </section>
       <p className="login-footer">WELLNEST <i>·</i> CARE, IN GOOD ORDER</p>
     </main>
