@@ -5,6 +5,9 @@ import {
   LogOut, Menu, MoreHorizontal, Pencil, Plus, Search, Settings2, Stethoscope,
   Trash2, UserRound, UsersRound, X,
 } from "lucide-react";
+import type { Session, User } from "@supabase/supabase-js";
+import AuthPage from "./AuthPage";
+import { getDemoStoreKey, setActiveDemoUser, supabase, supabaseConfigurationError } from "./supabase";
 import "./appointments.css";
 
 type Provider = { id: string; name: string; specialty: string; email: string; phone: string; color: string };
@@ -27,10 +30,7 @@ type DemoStore = {
   clinic: ClinicSettings;
 };
 const roles: Role[] = ["patient", "doctor", "receptionist", "admin"];
-const demoUserId = "admin";
-const demoPassword = "admin";
 const staticDemoMode = import.meta.env.VITE_STATIC_DEMO === "true";
-const demoStoreKey = "wellnest-pages-data-v1";
 
 const defaultDemoStore = (): DemoStore => ({
   appointments: [],
@@ -46,10 +46,10 @@ const defaultDemoStore = (): DemoStore => ({
 });
 
 const readDemoStore = (): DemoStore => {
-  const saved = localStorage.getItem(demoStoreKey);
+  const saved = localStorage.getItem(getDemoStoreKey());
   if (!saved) {
     const initial = defaultDemoStore();
-    localStorage.setItem(demoStoreKey, JSON.stringify(initial));
+    localStorage.setItem(getDemoStoreKey(), JSON.stringify(initial));
     return initial;
   }
   const store: unknown = JSON.parse(saved);
@@ -61,7 +61,7 @@ const readDemoStore = (): DemoStore => {
   return store as DemoStore;
 };
 
-const writeDemoStore = (store: DemoStore) => localStorage.setItem(demoStoreKey, JSON.stringify(store));
+const writeDemoStore = (store: DemoStore) => localStorage.setItem(getDemoStoreKey(), JSON.stringify(store));
 const minutesOf = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 const validDate = (date: string) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
@@ -245,64 +245,21 @@ const displayDate = (date: string, options: Intl.DateTimeFormatOptions = { month
 const initials = (name: string) => name.split(" ").filter(Boolean).slice(-2).map((part) => part[0]).join("").toUpperCase();
 const emptyForm = (date: string): FormData => ({ patientName: "", patientEmail: "", patientPhone: "", providerId: "", date, time: "09:00", duration: 30, type: "Consultation", status: "scheduled", notes: "" });
 
-function LoginPage({ onLogin }: { onLogin: (userId: string, password: string) => boolean }) {
-  const [userId, setUserId] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-
-  const submitLogin = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!onLogin(userId.trim(), password)) setError("That user ID or password is not correct.");
-  };
-
-  return (
-    <main className="login-page">
-      <section className="login-card">
-        <a className="login-brand" href={import.meta.env.BASE_URL} aria-label="Wellnest home">
-          <span className="brand-mark"><HeartPulse size={20} strokeWidth={2.2} /></span>
-          <span>wellnest<span className="brand-period">.</span><small>CARE OPERATIONS</small></span>
-        </a>
-        <div className="login-intro">
-          <span className="eyebrow">WELCOME BACK</span>
-          <h1>Sign in to your clinic</h1>
-          <p>Manage appointments and keep care moving.</p>
-        </div>
-        <form className="login-form" onSubmit={submitLogin}>
-          <label className="login-field">
-            <span>User ID</span>
-            <input autoFocus required autoComplete="username" value={userId} onChange={(event) => { setUserId(event.target.value); setError(""); }} placeholder="Enter your user ID" />
-          </label>
-          <label className="login-field">
-            <span>Password</span>
-            <input required type="password" autoComplete="current-password" value={password} onChange={(event) => { setPassword(event.target.value); setError(""); }} placeholder="Enter your password" />
-          </label>
-          {error && <p className="login-error" role="alert">{error}</p>}
-          <button className="primary-button login-submit" type="submit">Sign in <ArrowRight size={16} /></button>
-        </form>
-        <p className="login-demo-hint">Demo login: user ID <strong>admin</strong> · password <strong>admin</strong></p>
-        {staticDemoMode && <p className="login-demo-hint">Demo data is saved only in this browser and is not shared with other visitors.</p>}
-      </section>
-      <p className="login-footer">WELLNEST <i>·</i> CARE, IN GOOD ORDER</p>
-    </main>
-  );
-}
-
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem("wellnest-demo-auth") === "signed-in");
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [departments, setDepartments] = useState<string[]>([]);
   const [blockedSlots, setBlockedSlots] = useState<BlockedSlot[]>([]);
   const [clinic, setClinic] = useState<ClinicSettings>({ isOpen: true, openingTime: "09:00", closingTime: "18:00" });
-  const [role, setRole] = useState<Role>(() => {
-    const savedRole = localStorage.getItem("wellnest-demo-role");
-    return roles.includes(savedRole as Role) ? savedRole as Role : "admin";
-  });
-  const [view, setView] = useState<View>(() => localStorage.getItem("wellnest-demo-role") === "patient" ? "patient" : "overview");
+  const [role, setRole] = useState<Role>("patient");
+  const [view, setView] = useState<View>("patient");
   const [doctorProviderId, setDoctorProviderId] = useState("");
-  const [patientName, setPatientName] = useState(() => localStorage.getItem("wellnest-patient-name") || "");
-  const [patientEmail, setPatientEmail] = useState(() => localStorage.getItem("wellnest-patient-email") || "");
-  const [patientForm, setPatientForm] = useState<FormData>(() => ({ ...emptyForm(today), patientName: localStorage.getItem("wellnest-patient-name") || "", patientEmail: localStorage.getItem("wellnest-patient-email") || "" }));
+  const [patientName, setPatientName] = useState("");
+  const [patientEmail, setPatientEmail] = useState("");
+  const [patientForm, setPatientForm] = useState<FormData>(emptyForm(today));
   const [providerSearch, setProviderSearch] = useState("");
   const [patientDepartment, setPatientDepartment] = useState("all");
   const [departmentName, setDepartmentName] = useState("");
@@ -331,19 +288,15 @@ function App() {
   const [clinicDialogOpen, setClinicDialogOpen] = useState(false);
   const [clinicForm, setClinicForm] = useState({ openingTime: "09:00", closingTime: "18:00" });
 
-  const login = (userId: string, password: string) => {
-    if (userId !== demoUserId || password !== demoPassword) return false;
-    sessionStorage.setItem("wellnest-demo-auth", "signed-in");
-    localStorage.setItem("wellnest-demo-role", "admin");
-    setRole("admin");
-    setView("overview");
-    setIsAuthenticated(true);
-    return true;
-  };
-  const logout = () => {
-    sessionStorage.removeItem("wellnest-demo-auth");
-    setIsAuthenticated(false);
-    setAccountOpen(false);
+  const logout = async () => {
+    if (!supabase) return;
+    try {
+      const { error: signOutError } = await supabase.auth.signOut();
+      if (signOutError) throw signOutError;
+      setAccountOpen(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not sign out.");
+    }
   };
 
   const refresh = async () => {
@@ -365,7 +318,60 @@ function App() {
     }
   };
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    if (authUser) void refresh();
+  }, [authUser]);
+  useEffect(() => {
+    if (!supabase) {
+      setAuthReady(true);
+      return;
+    }
+
+    let disposed = false;
+    const syncSession = (session: Session | null) => {
+      const user = session?.user ?? null;
+      setAuthUser(user);
+      setActiveDemoUser(user?.id ?? null);
+      setAuthError("");
+      if (user) {
+        const metadataRole = user.app_metadata.role;
+        const nextRole = roles.includes(metadataRole as Role) ? metadataRole as Role : "patient";
+        const name = typeof user.user_metadata.full_name === "string" ? user.user_metadata.full_name : "";
+        const email = user.email ?? "";
+        setRole(nextRole);
+        setView(nextRole === "patient" ? "patient" : "overview");
+        setPatientName(name);
+        setPatientEmail(email);
+        setPatientForm((current) => ({ ...current, patientName: name, patientEmail: email }));
+      } else {
+        setRole("patient");
+        setView("patient");
+        setPatientName("");
+        setPatientEmail("");
+        setPatientForm(emptyForm(today));
+        setAppointments([]);
+        setProviders([]);
+        setDepartments([]);
+        setBlockedSlots([]);
+        setLoading(true);
+      }
+      setAuthReady(true);
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!disposed) syncSession(session);
+    });
+    void supabase.auth.getSession().then(({ data, error: sessionError }) => {
+      if (disposed) return;
+      syncSession(data.session);
+      if (sessionError) setAuthError(sessionError.message);
+    });
+
+    return () => {
+      disposed = true;
+      subscription.unsubscribe();
+    };
+  }, []);
   useEffect(() => {
     if (providers.length && !doctorProviderId) setDoctorProviderId(providers[0].id);
     if (providers.length && !patientForm.providerId) setPatientForm((current) => ({ ...current, providerId: providers[0].id }));
@@ -439,18 +445,20 @@ function App() {
       await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not update appointment."); }
   };
-  const switchRole = (nextRole: Role) => {
-    setRole(nextRole);
-    setView(nextRole === "patient" ? "patient" : "overview");
-    localStorage.setItem("wellnest-demo-role", nextRole);
-    setMobileNav(false);
-  };
-  const savePatientProfile = (event: React.FormEvent<HTMLFormElement>) => {
+  const savePatientProfile = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    localStorage.setItem("wellnest-patient-name", patientName.trim());
-    localStorage.setItem("wellnest-patient-email", patientEmail.trim());
-    setPatientForm((current) => ({ ...current, patientName: patientName.trim(), patientEmail: patientEmail.trim() }));
-    setNotice("Patient profile saved on this device.");
+    if (!supabase) return;
+    setSaving(true);
+    try {
+      const { error: profileError } = await supabase.auth.updateUser({ data: { full_name: patientName.trim() } });
+      if (profileError) throw profileError;
+      setPatientForm((current) => ({ ...current, patientName: patientName.trim(), patientEmail }));
+      setNotice("Patient profile saved to your account.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update your profile.");
+    } finally {
+      setSaving(false);
+    }
   };
   const submitPatientBooking = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -574,7 +582,12 @@ function App() {
   const pendingConfirmations = appointments.filter((appointment) => appointment.status === "scheduled" && appointment.date >= today);
   const pageTitle = view === "overview" ? "Overview" : view === "schedule" ? role === "doctor" ? "My schedule" : role === "patient" ? "My appointments" : "Appointments" : view === "providers" ? "Care team" : view === "patient" ? "Book a visit" : view === "departments" ? "Departments" : view === "availability" ? "Time slots" : "Reports";
 
-  if (!isAuthenticated) return <LoginPage onLogin={login} />;
+  if (!authReady) {
+    return <main className="login-page"><p className="login-message" role="status">Checking your account…</p></main>;
+  }
+  if (!supabase || !authUser) {
+    return <AuthPage client={supabase} configurationError={supabaseConfigurationError} initialError={authError} />;
+  }
 
   return (
     <div className="clinic-shell">
@@ -597,7 +610,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           {role === "admin" && <button className="support-card" onClick={openClinicSettings}><span className="support-icon"><Activity size={17} /></span><span><strong>Clinic {clinic.isOpen ? "open" : "closed"}</strong><span>{clinic.openingTime}–{clinic.closingTime} · Manage hours</span></span><i className={clinic.isOpen ? "online-dot" : "closed-dot"} /></button>}
-          <div className="account-wrap"><button className="account-button" aria-expanded={accountOpen} onClick={() => setAccountOpen((open) => !open)}><span className="account-avatar">{role === "patient" ? "PT" : role === "doctor" ? "DR" : role === "receptionist" ? "RC" : "AM"}</span><span className="account-copy"><strong>{role === "patient" ? patientName || "Patient" : role === "doctor" ? providerById.get(doctorProviderId)?.name || "Care provider" : role === "receptionist" ? "Front desk" : "Alex Morgan"}</strong><small>{role === "admin" ? "Practice admin" : `${role[0].toUpperCase()}${role.slice(1)} demo`}</small></span><MoreHorizontal size={19} /></button>{accountOpen && <div className="account-menu"><strong>Demo workspace</strong><span>Switch the active workflow above.</span>{role === "admin" && <button onClick={openClinicSettings}><Settings2 size={15} />Clinic hours & status</button>}<button onClick={logout}><LogOut size={15} />Sign out</button></div>}</div>
+          <div className="account-wrap"><button className="account-button" aria-expanded={accountOpen} onClick={() => setAccountOpen((open) => !open)}><span className="account-avatar">{role === "patient" ? "PT" : role === "doctor" ? "DR" : role === "receptionist" ? "RC" : "AM"}</span><span className="account-copy"><strong>{role === "patient" ? patientName || "Patient" : role === "doctor" ? providerById.get(doctorProviderId)?.name || "Care provider" : role === "receptionist" ? "Front desk" : "Alex Morgan"}</strong><small>{authUser.email}</small></span><MoreHorizontal size={19} /></button>{accountOpen && <div className="account-menu"><strong>Signed in</strong><span>{authUser.email}</span>{role === "admin" && <button onClick={openClinicSettings}><Settings2 size={15} />Clinic hours & status</button>}<button onClick={() => void logout()}><LogOut size={15} />Sign out</button></div>}</div>
         </div>
       </aside>
 
@@ -605,7 +618,7 @@ function App() {
         <header className="topbar">
           <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(!mobileNav)}><Menu size={19} /></button>
           <div className="breadcrumb">Care operations <span>/</span> <strong>{pageTitle}</strong></div>
-          <div className="top-actions"><label className="role-picker"><span>Demo role</span><select aria-label="Switch demo role" value={role} onChange={(event) => switchRole(event.target.value as Role)}>{roles.map((item) => <option key={item} value={item}>{item[0].toUpperCase()}{item.slice(1)}</option>)}</select></label>{role === "admin" && <button className={`today-label clinic-toggle ${clinic.isOpen ? "clinic-open" : "clinic-closed"}`} aria-label={`${clinic.isOpen ? "Close" : "Open"} clinic`} onClick={() => void toggleClinic()}><span className={clinic.isOpen ? "online-dot" : "closed-dot"} />Clinic {clinic.isOpen ? "open" : "closed"}<span className="clinic-hours-summary">{clinic.openingTime}–{clinic.closingTime}</span></button>}<div className="notifications-wrap"><button className="icon-button" aria-label="Notifications" aria-expanded={notificationsOpen} onClick={showNotifications}><Bell size={18} />{pendingConfirmations.length > 0 && !notificationsSeen && <i className="notification-dot" />}</button>{notificationsOpen && <section className="notification-panel" aria-label="Notifications"><div className="notification-heading"><div><strong>Notifications</strong><span>{pendingConfirmations.length} awaiting confirmation</span></div><button className="icon-button" aria-label="Close notifications" onClick={() => setNotificationsOpen(false)}><X size={16} /></button></div>{pendingConfirmations.length ? <div className="notification-message"><span className="notification-icon"><CalendarDays size={16} /></span><p><strong>{pendingConfirmations.length} appointment{pendingConfirmations.length === 1 ? "" : "s"}</strong><span>Need confirmation from the care team.</span></p></div> : <div className="notification-empty">You’re all caught up.</div>}<button className="notification-link" onClick={() => { setView("schedule"); setNotificationsOpen(false); }}>View appointments<ArrowRight size={14} /></button></section>}</div><span className="top-avatar" title={`Active demo role: ${role}`}>{role === "patient" ? "PT" : role === "doctor" ? "DR" : role === "receptionist" ? "RC" : "AM"}</span></div>
+          <div className="top-actions">{role === "admin" && <button className={`today-label clinic-toggle ${clinic.isOpen ? "clinic-open" : "clinic-closed"}`} aria-label={`${clinic.isOpen ? "Close" : "Open"} clinic`} onClick={() => void toggleClinic()}><span className={clinic.isOpen ? "online-dot" : "closed-dot"} />Clinic {clinic.isOpen ? "open" : "closed"}<span className="clinic-hours-summary">{clinic.openingTime}–{clinic.closingTime}</span></button>}<div className="notifications-wrap"><button className="icon-button" aria-label="Notifications" aria-expanded={notificationsOpen} onClick={showNotifications}><Bell size={18} />{pendingConfirmations.length > 0 && !notificationsSeen && <i className="notification-dot" />}</button>{notificationsOpen && <section className="notification-panel" aria-label="Notifications"><div className="notification-heading"><div><strong>Notifications</strong><span>{pendingConfirmations.length} awaiting confirmation</span></div><button className="icon-button" aria-label="Close notifications" onClick={() => setNotificationsOpen(false)}><X size={16} /></button></div>{pendingConfirmations.length ? <div className="notification-message"><span className="notification-icon"><CalendarDays size={16} /></span><p><strong>{pendingConfirmations.length} appointment{pendingConfirmations.length === 1 ? "" : "s"}</strong><span>Need confirmation from the care team.</span></p></div> : <div className="notification-empty">You’re all caught up.</div>}<button className="notification-link" onClick={() => { setView("schedule"); setNotificationsOpen(false); }}>View appointments<ArrowRight size={14} /></button></section>}</div><span className="top-avatar" title={`Signed in: ${authUser.email}`}>{role === "patient" ? "PT" : role === "doctor" ? "DR" : role === "receptionist" ? "RC" : "AM"}</span></div>
         </header>
 
         <div className="page-content">
@@ -613,16 +626,16 @@ function App() {
           {notice && <div className="success-banner" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={() => setNotice("")}><X size={16} /></button></div>}
           {view === "patient" ? (
             <section className="patient-page fade-in">
-              <div className="page-heading"><div><span className="eyebrow">PATIENT PORTAL · DEMO</span><h1>Find a time that works<span className="heading-period">.</span></h1><p>Choose a provider and request an available appointment.</p></div></div>
+              <div className="page-heading"><div><span className="eyebrow">PATIENT PORTAL</span><h1>Find a time that works<span className="heading-period">.</span></h1><p>Choose a provider and request an available appointment.</p></div></div>
               <div className="portal-grid">
                 <article className="portal-card">
                   <div className="lower-heading"><div><span className="eyebrow">YOUR DETAILS</span><h2>Patient profile</h2></div><UserRound size={20} /></div>
                   <form className="portal-form" onSubmit={savePatientProfile}>
                     <label className="form-field"><span>Full name</span><input required value={patientName} onChange={(event) => setPatientName(event.target.value)} placeholder="Your name" /></label>
-                    <label className="form-field"><span>Email address</span><input required type="email" value={patientEmail} onChange={(event) => setPatientEmail(event.target.value)} placeholder="you@example.com" /></label>
-                    <button className="secondary-button" type="submit">Save patient profile</button>
+                    <label className="form-field"><span>Account email</span><input required type="email" value={patientEmail} readOnly /></label>
+                    <button className="secondary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Save patient profile"}</button>
                   </form>
-                  <p className="demo-note">This demo stores your profile on this device only. It does not provide password-based sign-in.</p>
+                  <p className="demo-note">Appointment and clinic data in this demo remains on this browser and is not shared with clinic staff. Do not enter real patient information.</p>
                 </article>
                 <article className="portal-card">
                   <div className="lower-heading"><div><span className="eyebrow">BOOK ONLINE</span><h2>Request an appointment</h2></div><CalendarDays size={20} /></div>
